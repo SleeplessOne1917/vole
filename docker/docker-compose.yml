@@ -1,0 +1,153 @@
+version: "3.3"
+
+networks:
+  # communication to web and clients
+  voleexternalproxy:
+  # communication between lemmy services
+  voleinternal:
+    driver: bridge
+    internal: true
+
+services:
+  proxy:
+    image: nginx:1-alpine
+    networks:
+      - voleinternal
+      - voleexternalproxy
+    ports:
+      # actual and only port facing any connection from outside
+      - "1234:1234"
+      - "8537:8537"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro,Z
+    restart: always
+    depends_on:
+      - pictrs
+      - vole
+
+  lemmy:
+    image: dessalines/lemmy:dev
+    # use this to build your local lemmy server image for development
+    # run docker compose up --build
+    # build:
+    #   context: ../
+    #   dockerfile: docker/Dockerfile
+    # args:
+    #   RUST_RELEASE_MODE: release
+    # this hostname is used in nginx reverse proxy and also for vole to connect to the backend, do not change
+    hostname: lemmy
+    networks:
+      - voleinternal
+    restart: always
+    environment:
+      - RUST_LOG="warn,lemmy_server=debug,lemmy_api=debug,lemmy_api_common=debug,lemmy_api_crud=debug,lemmy_apub=debug,lemmy_db_schema=debug,lemmy_db_views=debug,lemmy_db_views_actor=debug,lemmy_db_views_moderator=debug,lemmy_routes=debug,lemmy_utils=debug,lemmy_websocket=debug"
+      - RUST_BACKTRACE=full
+    volumes:
+      - ./lemmy.hjson:/config/config.hjson:Z
+    depends_on:
+      - postgres
+      - pictrs
+
+  vole:
+    # use this to build your local vole image for development
+    # run docker compose up --build
+    # assuming vole is cloned besides lemmy directory
+    build:
+      context: ../../vole
+      dockerfile: dev.dockerfile
+    networks:
+      - voleinternal
+    environment:
+      # this needs to match the hostname defined in the lemmy service
+      - VOLE_LEMMY_INTERNAL_HOST=lemmy:8537
+      # set the outside hostname here
+      - VOLE_LEMMY_EXTERNAL_HOST=localhost:1234
+      - VOLE_HTTPS=false
+      - VOLE_DEBUG=true
+    depends_on:
+      - lemmy
+    restart: always
+    command: "npm run dev"
+
+  pictrs:
+    image: asonix/pictrs:0.4.0-beta.19
+    # this needs to match the pictrs url in lemmy.hjson
+    hostname: pictrs
+    # we can set options to pictrs like this, here we set max. image size and forced format for conversion
+    # entrypoint: /sbin/tini -- /usr/local/bin/pict-rs -p /mnt -m 4 --image-format webp
+    networks:
+      - voleinternal
+    environment:
+      - PICTRS_OPENTELEMETRY_URL=http://otel:4137
+      - PICTRS__API_KEY=API_KEY
+      - RUST_LOG=debug
+      - RUST_BACKTRACE=full
+      - PICTRS__MEDIA__VIDEO_CODEC=vp9
+      - PICTRS__MEDIA__GIF__MAX_WIDTH=256
+      - PICTRS__MEDIA__GIF__MAX_HEIGHT=256
+      - PICTRS__MEDIA__GIF__MAX_AREA=65536
+      - PICTRS__MEDIA__GIF__MAX_FRAME_COUNT=400
+    user: 991:991
+    volumes:
+      - ./volumes/pictrs:/mnt:Z
+    restart: always
+
+  postgres:
+    image: postgres:15-alpine
+    # this needs to match the database host in lemmy.hson
+    # Tune your settings via
+    # https://pgtune.leopard.in.ua/#/
+    # You can use this technique to add them here
+    # https://stackoverflow.com/a/30850095/1655478
+    hostname: postgres
+    command:
+      [
+        "postgres",
+        "-c",
+        "session_preload_libraries=auto_explain",
+        "-c",
+        "auto_explain.log_min_duration=5ms",
+        "-c",
+        "auto_explain.log_analyze=true",
+        "-c",
+        "track_activity_query_size=1048576",
+      ]
+    networks:
+      - voleinternal
+      # adding the external facing network to allow direct db access for devs
+      - voleexternalproxy
+    ports:
+      # use a different port so it doesnt conflict with potential postgres db running on the host
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=vole
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=vole
+    volumes:
+      - ./volumes/postgres:/var/lib/postgresql/data:Z
+    restart: always
+
+  otel:
+    image: otel/opentelemetry-collector:latest
+    command: --config otel-local-config.yaml
+    networks:
+      - voleinternal
+      - voleexternalproxy
+    ports:
+      - "4317:4317"
+    volumes:
+      - ./otel.yml:/otel-local-config.yaml:Z
+    restart: unless-stopped
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:1
+    networks:
+      - voleinternal
+      - voleexternalproxy
+    ports:
+      - "14250:14250"
+      # To view traces, visit http://localhost:16686
+      - "16686:16686"
+    restart: unless-stopped
