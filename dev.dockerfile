@@ -25,10 +25,3 @@ COPY src src
 COPY public public
 
 RUN pnpm i --prefer-offline
-
-FROM node:alpine as runner
-COPY --from=builder /usr/src/app /app
-COPY --from=builder /usr/src/app/node_modules /app/node_modules
-
-EXPOSE 1234
-WORKDIR /app
